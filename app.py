@@ -1,40 +1,48 @@
-# These are the necessary import declarations
-from opentelemetry import trace
-from opentelemetry import metrics
-
+from flask import Flask, request, redirect
 from random import randint
-from flask import Flask, request
 import logging
 
-# Acquire a tracer
-tracer = trace.get_tracer("diceroller.tracer")
-# Acquire a meter.
-meter = metrics.get_meter("diceroller.meter")
+from opentelemetry import trace, metrics
+from opentelemetry.trace import Status, StatusCode
 
-# Now create a counter instrument to make measurements with
-roll_counter = meter.create_counter(
-    "dice.rolls",
-    description="The number of rolls by roll value",
+# Telemetry initialization
+telemetry_tracer = trace.get_tracer("jithin.monitoring.tracer")
+telemetry_meter = metrics.get_meter("jithin.monitoring.meter")
+
+# Defining a custom metric to count rolls
+dice_rolls_metric = telemetry_meter.create_counter(
+    "dice_rolls_total",
+    description="Count of dice rolls by value",
 )
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+log = logging.getLogger("dice-tracker")
 
-@app.route("/rolldice")
-def roll_dice():
-    # This creates a new span that's the child of the current one
-    with tracer.start_as_current_span("roll") as roll_span:
-        player = request.args.get('player', default = None, type = str)
-        result = str(roll())
-        roll_span.set_attribute("roll.value", result)
-        # This adds 1 to the counter for the given roll value
-        roll_counter.add(1, {"roll.value": result})
-        if player:
-            logger.warn("{} is rolling the dice: {}", player, result)
-        else:
-            logger.warn("Anonymous player is rolling the dice: %s", result)
-        return result
+@app.route("/")
+def home():
+    return redirect("/dicetracker")
 
-def roll():
-    return randint(1, 6)
+@app.route("/dicetracker")
+def dice_roll():
+    with telemetry_tracer.start_as_current_span("dice_roll_span") as span:
+        username = request.args.get('player', default="guest", type=str)
+        try:
+            rolled_value = roll_dice_logic()
+            span.set_attribute("dice.value", rolled_value)
+            dice_rolls_metric.add(1, {"dice.value": str(rolled_value)})
+
+            log.info("User %s got a roll of: %s", username, rolled_value)
+            return str(rolled_value)
+
+        except Exception as err:
+            span.record_exception(err)
+            span.set_status(Status(StatusCode.ERROR, str(err)))
+            log.error("Dice roll failed: %s", err)
+            return f"Error occurred: {str(err)}", 500
+
+def roll_dice_logic():
+    number = randint(1, 6)
+    if number == 1:
+        raise ValueError("Critical failure! Dice landed on 1")
+    return number
